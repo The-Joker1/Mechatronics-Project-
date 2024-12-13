@@ -1,7 +1,7 @@
 #include <Wire.h>
 #include <Adafruit_MotorShield.h>
-#include <PID_v1.h>
 
+// Création d'une instance du shield moteur
 Adafruit_MotorShield AFMS = Adafruit_MotorShield();
 Adafruit_DCMotor *myMotor1 = AFMS.getMotor(1);
 Adafruit_DCMotor *myMotor2 = AFMS.getMotor(2);
@@ -9,95 +9,124 @@ Adafruit_DCMotor *myMotor2 = AFMS.getMotor(2);
 #define CPT_LEFT 3
 #define CPT_RIGHT 2
 
-#define SPEED 100
+#define CPT_US_TRIG_PIN 10
+#define CPT_US_ECHO_PIN 11
 
-// PID parameters
-double setpointLeft = 0;
-double setpointRight = 0;
-double inputLeft, outputLeft, inputRight, outputRight;
-double Kp = 2, Ki = 5, Kd = 1;
-PID pidLeft(&inputLeft, &outputLeft, &setpointLeft, Kp, Ki, Kd, DIRECT);
-PID pidRight(&inputRight, &outputRight, &setpointRight, Kp, Ki, Kd, DIRECT);
+#define SPEED 50
+#define SPEEDB 30
 
-volatile long encoderPosLeft = 0;
-volatile long encoderPosRight = 0;
+// PID Variables
+float error = 0, lastError = 0, correction = 0;
+float p = 0, i = 0, d = 0;
+float Kp = 5.0, Ki = 0.2, Kd = 2.0;
+
+// Consigne (ligne au centre entre les deux capteurs)
+const float setPoint = 0.0;
+
+// Variable pour la distance
+float distance = 0.0;
+// Distance seuil en cm
+const float seuil = 10.0;
+// Variable booléenne
+bool estProche = true;
 
 void setup() {
-  // Start serial communication
+  // Démarrer la communication série
   Serial.begin(9600);
-  while (!Serial); // Wait for the serial connection to be established
+  while (!Serial); // Attendre que la connexion série soit établie
 
-  // Log that the program has started
-  Serial.println("Program started!");
+  Serial.println("Programme démarré!");
 
   pinMode(CPT_LEFT, INPUT);
   pinMode(CPT_RIGHT, INPUT);
 
+  pinMode(CPT_US_TRIG_PIN, OUTPUT);
+  pinMode(CPT_US_ECHO_PIN, INPUT);
+
+  // Initialisation du shield moteur
   AFMS.begin();
-  delay(5000);  // Wait for motor shield initialization
+  delay(5000);  // Attendre l'initialisation du shield moteur
 
-  // Log motor shield initialization
-  Serial.println("Motor shield initialized.");
-
-  // Initialize PID controllers
-  pidLeft.SetMode(AUTOMATIC);
-  pidRight.SetMode(AUTOMATIC);
-
-  // Attach interrupts for encoders
-  attachInterrupt(digitalPinToInterrupt(CPT_LEFT), updateEncoderLeft, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(CPT_RIGHT), updateEncoderRight, CHANGE);
+  Serial.println("Shield moteur initialisé.");
 }
 
 void loop() {
-  bool left = digitalRead(CPT_LEFT);
-  bool right = digitalRead(CPT_RIGHT);
+  // Lire les valeurs des capteurs
+  bool left = digitalRead(CPT_LEFT);  // Détection du noir
+  bool right = digitalRead(CPT_RIGHT); // Détection du noir
 
-  // Log what the sensors detect
-  Serial.print("Left sensor: ");
-  Serial.print(left ? "HIGH" : "LOW");
-  Serial.print("  Right sensor: ");
-  Serial.println(right ? "HIGH" : "LOW");
+  // Log des valeurs détectées par les capteurs
+  Serial.print("CPT_LEFT: ");
+  Serial.print(left);
+  Serial.print("  CPT_RIGHT: ");
+  Serial.println(right);
 
-  inputLeft = encoderPosLeft;
-  inputRight = encoderPosRight;
+  // Génération de l'impulsion sur le Trig
+  digitalWrite(CPT_US_TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(CPT_US_TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(CPT_US_TRIG_PIN, LOW);
 
-  pidLeft.Compute();
-  pidRight.Compute();
+  // Lecture de l'impulsion sur l'Echo
+  long duration = pulseIn(CPT_US_ECHO_PIN, HIGH);
 
-  int speedLeft = map(outputLeft, 0, 255, 0, SPEED);
-  int speedRight = map(outputRight, 0, 255, 0, SPEED);
+  // Calcul de la distance en cm
+  distance = (duration * 0.034) / 2;
 
-  if (!left && !right) {
-    Serial.println("Both sensors are LOW. Moving forward.");
-    myMotor1->setSpeed(speedLeft);
-    myMotor2->setSpeed(speedRight);
-    myMotor1->run(FORWARD);
-    myMotor2->run(FORWARD);
-  } else if (!left && right) {
-    Serial.println("Left sensor is LOW, Right sensor is HIGH. Turning left.");
-    myMotor1->setSpeed(speedLeft);
-    myMotor1->run(RELEASE);
-    myMotor2->run(FORWARD);
-  } else if (left && !right) {
-    Serial.println("Left sensor is HIGH, Right sensor is LOW. Turning right.");
-    myMotor2->setSpeed(speedRight);
-    myMotor1->run(FORWARD);
-    myMotor2->run(RELEASE);
+  // Mise à jour de la variable booléenne
+  if (distance > seuil) {
+    estProche = false;
   } else {
-    Serial.println("Both sensors are HIGH. Stopping motors.");
+    estProche = true;
+  }
+
+  if (!estProche) {
+    Serial.println("NO OBSTACLE");
+
+    // Calcul de l'erreur en fonction des capteurs
+    if (left && !right) {
+      error = -1.0; // Ligne à gauche
+    } else if (!left && right) {
+      error = 1.0; // Ligne à droite
+    } else if (left && right) {
+      error = 0.0; // Ligne au centre
+    } else {
+      error = lastError; // Cas spécial : continuer sur la dernière erreur
+    }
+
+    // PID : Calculer la correction
+    p = error;
+    i += error;
+    d = error - lastError;
+
+    correction = Kp * p + Ki * i + Kd * d;
+    lastError = error;
+
+    // Appliquer la correction aux moteurs
+    int speedLeft = SPEED - correction;
+    int speedRight = SPEED + correction;
+
+    // Limiter les vitesses dans les bornes 0-255
+    speedLeft = constrain(speedLeft, 0, 255);
+    speedRight = constrain(speedRight, 0, 255);
+
+    myMotor1->setSpeed(speedRight);
+    myMotor2->setSpeed(speedLeft);
+
+    myMotor1->run(FORWARD);
+    myMotor2->run(FORWARD);
+
+  } else {
+    Serial.println("OBSTACLE");
+    Serial.println("STOP");
     myMotor1->run(RELEASE);
     myMotor2->run(RELEASE);
   }
 
-  delay(1000);  // Small delay to make the serial output readable
+  // Log de la correction PID
+  Serial.print("Error: ");
+  Serial.print(error);
+  Serial.print(" Correction: ");
+  Serial.println(correction);
 }
-
-void updateEncoderLeft() {
-  encoderPosLeft += (digitalRead(CPT_LEFT) == HIGH) ? 1 : -1;
-}
-
-void updateEncoderRight() {
-  encoderPosRight += (digitalRead(CPT_RIGHT) == HIGH) ? 1 : -1;
-}
-
-"""explications : entrée --> encodeurs, sorties --> vitesse des moteurs """
